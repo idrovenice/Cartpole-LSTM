@@ -1,6 +1,5 @@
 '''
-OpenAI-Gym Cartpole-v0 LSTM experiment
-Source code from: Giuseppe Bonaccorso (http://www.bonaccorso.eu)
+OpenAI-Gym Cartpole-v1 LSTM experiment
 '''
 
 import os
@@ -14,6 +13,7 @@ warnings.filterwarnings('ignore', category=UserWarning, module='google.protobuf'
 warnings.filterwarnings('ignore', category=DeprecationWarning)
 
 import gymnasium as gym
+from gymnasium.wrappers import FrameStackObservation, NormalizeObservation
 import numpy as np
 import time
 import click
@@ -23,7 +23,7 @@ import logging
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
 from keras.models import Sequential
-from keras.layers import Dense, Activation, LSTM, Input
+from keras.layers import Dense, Activation, LSTM, Input, Reshape
 from keras import backend as K
 
 # Result location
@@ -49,19 +49,27 @@ class CartPoleController(object):
         self.step_threshold = 0.5
         self.sequence_length = sequence_length
         
-        # Initialize observation and action history buffers
-        self.obs_history = []
+        # Store action history for the LSTM input
         self.action_history = []
+        
+        # With FrameStack wrapper, we'll receive stacked observations directly
+        # Input shape is (sequence_length * n_input + sequence_length,) 
+        # - stacked observations + stacked actions
+        self.obs_input_dim = sequence_length * n_input
+        self.action_input_dim = sequence_length
+        self.total_input_dim = self.obs_input_dim + self.action_input_dim
 
         # Action neural network
-        # Input shape is now (sequence_length, n_input + 1) where +1 is for the action
+        # Input is flattened stacked observations + stacked actions
         # LSTM -> (n_hidden)
         # Dense output -> (n_output)
         self.action_model = Sequential()
         
-        # Add Input layer first to avoid the warning
-        # Input includes both observation (4 dims) and previous action (1 dim)
-        self.action_model.add(Input(shape=(self.sequence_length, self.n_input + 1)))
+        # Reshape flattened input back to sequence format for LSTM
+        # Each timestep has (n_input + 1) features: observation + previous action
+        self.action_model.add(Input(shape=(self.total_input_dim,)))
+        self.action_model.add(Dense(self.total_input_dim, activation='linear'))  # Optional preprocessing
+        self.action_model.add(Reshape((self.sequence_length, self.n_input + 1)))
         self.action_model.add(LSTM(self.n_hidden))
         self.action_model.add(Activation('tanh'))
         self.action_model.add(Dense(self.n_output))
@@ -70,66 +78,41 @@ class CartPoleController(object):
         self.action_model.compile(loss='mse', optimizer='adam')
 
     def reset_episode(self):
-        """Reset the history buffers at the start of each episode"""
-        self.obs_history = []
+        """Reset the action history at the start of each episode"""
         self.action_history = []
 
-    def _prepare_sequence(self, obs, action=None):
-        """Prepare the input sequence for the LSTM"""
-        # Handle the case where obs might be a tuple (observation, info)
-        if isinstance(obs, tuple):
-            obs = obs[0]
+    def _prepare_input(self, obs):
+        """Prepare the input combining stacked observations and action history"""
+        # obs is already stacked by FrameStack wrapper: shape (sequence_length, n_input)
+        # Flatten observations
+        obs_flat = obs.flatten()  # shape: (sequence_length * n_input,)
         
-        # Add current observation to history
-        self.obs_history.append(obs.copy())
-        
-        # Add action to history (use 0 for the first action when none is provided)
-        if action is not None:
-            self.action_history.append(action)
+        # Pad action history if needed
+        current_actions = len(self.action_history)
+        if current_actions < self.sequence_length:
+            # Pad with zeros for missing actions
+            padded_actions = [0] * (self.sequence_length - current_actions) + self.action_history
         else:
-            self.action_history.append(0)  # Default action for first step
+            # Take last sequence_length actions
+            padded_actions = self.action_history[-self.sequence_length:]
         
-        # Keep only the last sequence_length items
-        if len(self.obs_history) > self.sequence_length:
-            self.obs_history = self.obs_history[-self.sequence_length:]
-            self.action_history = self.action_history[-self.sequence_length:]
+        # Combine observations and actions
+        action_array = np.array(padded_actions, dtype=np.float32)
+        combined_input = np.concatenate([obs_flat, action_array])
         
-        # Pad with zeros if we don't have enough history yet
-        current_length = len(self.obs_history)
-        if current_length < self.sequence_length:
-            # Pad with zeros for missing timesteps
-            pad_length = self.sequence_length - current_length
-            padded_obs = [np.zeros(self.n_input) for _ in range(pad_length)] + self.obs_history
-            padded_actions = [0] * pad_length + self.action_history
-        else:
-            padded_obs = self.obs_history
-            padded_actions = self.action_history
-        
-        # Create the input sequence: concatenate observation with previous action
-        sequence = np.zeros((1, self.sequence_length, self.n_input + 1))
-        for i in range(self.sequence_length):
-            sequence[0, i, :self.n_input] = padded_obs[i]
-            # For the first timestep, use 0 as previous action, otherwise use actual previous action
-            if i == 0:
-                sequence[0, i, self.n_input] = 0
-            else:
-                sequence[0, i, self.n_input] = padded_actions[i-1]
-        
-        return sequence.astype(K.floatx())
+        return combined_input.reshape(1, -1).astype(K.floatx())
 
     def action(self, obs, prev_obs=None, prev_action=None, verbose=False):
-        # Note: prev_obs and prev_action are now managed internally through history
-        
-        # Prepare the sequence for prediction
-        x = self._prepare_sequence(obs)
+        # Prepare input with current observations and action history
+        x = self._prepare_input(obs)
         
         # Training step using previous observation if available
-        if prev_obs is not None and len(self.obs_history) > 1:
-            prev_norm = np.linalg.norm(prev_obs)
+        if prev_obs is not None and prev_action is not None:
+            prev_norm = np.linalg.norm(prev_obs.flatten())
 
             if prev_norm > self.training_threshold:
-                # Prepare training sequence using previous state
-                train_x = self._prepare_sequence(prev_obs, prev_action)
+                # Prepare training input using previous observation and action history
+                train_x = self._prepare_input(prev_obs)
                 
                 if prev_norm < self.step_threshold:
                     y = np.array([prev_action]).astype(K.floatx())
@@ -139,20 +122,29 @@ class CartPoleController(object):
                 self.action_model.train_on_batch(train_x, y)
 
         if verbose:
-            print(f"obs shape: {obs.shape if not isinstance(obs, tuple) else obs[0].shape}")
-            print(f"obs values: {np.array(obs if not isinstance(obs, tuple) else obs[0]).round(3)}")
-            print(f"sequence shape: {x.shape}")
-            print(f"history length: {len(self.obs_history)}")
-            print("Observation sequence:")
-            for i, seq_obs in enumerate(x[0]):
-                obs_part = seq_obs[:self.n_input].round(3)
-                action_part = seq_obs[self.n_input]
-                print(f"  Step {i+1}: obs={obs_part}, prev_action={action_part}")
+            print(f"obs shape: {obs.shape}")
+            print(f"obs values (first 8): {obs.flatten()[:8].round(3)}")
+            print(f"action history: {self.action_history}")
+            print(f"input shape to model: {x.shape}")
+            # Show the stacked observations and actions
+            print("Stacked observations:")
+            for i in range(self.sequence_length):
+                start_idx = i * self.n_input
+                end_idx = (i + 1) * self.n_input
+                frame_obs = obs.flatten()[start_idx:end_idx]
+                action_idx = len(self.action_history) - self.sequence_length + i if len(self.action_history) >= self.sequence_length else max(0, len(self.action_history) + i - self.sequence_length + 1)
+                prev_act = self.action_history[action_idx] if 0 <= action_idx < len(self.action_history) else 0
+                print(f"  Frame {i+1}: obs={frame_obs.round(3)}, prev_action={prev_act}")
+            print("---")
         
         # Predict new action
         output = self.action_model.predict(x, batch_size=1, verbose=0)
-
-        return self.step(output)
+        new_action = self.step(output)
+        
+        # Store the new action in history
+        self.action_history.append(new_action)
+        
+        return new_action
 
     def step(self, value):
         if value > self.step_threshold:
@@ -167,31 +159,35 @@ def run_experiment(visual_mode=True, episodes=100, max_time=120, sequence_length
     # Set random seed
     np.random.seed(1000)
     
-    print('OpenAI-Gym CartPole-v0 LSTM experiment')
+    print('OpenAI-Gym CartPole-v1 LSTM experiment with Gymnasium Wrappers')
     print(f"Mode: {'Visual' if visual_mode else 'Text-only'}")
     print(f"Episodes: {episodes}")
     print(f"Max time per episode: {max_time}s")
     print(f"Sequence length: {sequence_length}")
     print("-" * 50)
 
-    # Create environment with or without visual rendering
+    # Create environment with wrappers
     if visual_mode:
-        env = gym.make('CartPole-v0', render_mode='human')
+        env = gym.make('CartPole-v1', render_mode='human')
     else:
-        env = gym.make('CartPole-v0')
+        env = gym.make('CartPole-v1')
+    
+    # Apply wrappers
+    env = NormalizeObservation(env)  # Normalize observations
+    env = FrameStackObservation(env, stack_size=sequence_length)  # Stack frames for temporal context
     
     cart_pole_controller = CartPoleController(sequence_length=sequence_length)
     total_reward = []
 
     for episode in range(episodes):
-        # Reset environment and controller history
+        # Reset environment and action history
         reset_result = env.reset()
         if isinstance(reset_result, tuple):
             observation = reset_result[0]
         else:
             observation = reset_result
         
-        # Reset the controller's episode history
+        # Reset the controller's action history
         cart_pole_controller.reset_episode()
         
         # Get first action
@@ -261,10 +257,10 @@ def run_experiment(visual_mode=True, episodes=100, max_time=120, sequence_length
               help='Enable verbose output')
 def main(visual, episodes, max_time, sequence_length, verbose):
     """
-    CartPole LSTM Reinforcement Learning Experiment
+    CartPole LSTM Reinforcement Learning Experiment with Gymnasium Wrappers
     
-    This script trains an LSTM neural network to control a CartPole environment.
-    The LSTM uses sequences of observations and actions for better temporal learning.
+    This script trains an LSTM neural network to control a CartPole-v1 environment.
+    Uses Gymnasium's FrameStack and NormalizeObservation wrappers for better performance.
     
     Examples:
     

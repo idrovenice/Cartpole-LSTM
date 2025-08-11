@@ -1,14 +1,26 @@
-# CartPole LSTM Reinforcement Learning
+# CartPole LSTM Reinforcement Learning with Gymnasium Wrappers
 
-A reinforcement learning experiment using LSTM neural networks to control a CartPole environment from OpenAI Gymnasium.
+A reinforcement learning experiment using LSTM neural networks to control a CartPole-v1 environment from OpenAI Gymnasium, enhanced with modern Gymnasium wrappers for better performance.
 
 ## Features
 
 - LSTM-based neural network controller
+- **CartPole-v1** environment (updated from v0)
+- **Gymnasium Wrappers Integration**:
+  - `FrameStackObservation`: Automatic temporal frame stacking
+  - `NormalizeObservation`: Automatic observation normalization
 - Real-time online learning during episodes
 - Command-line interface with visual and text-only modes
-- Configurable number of episodes and time limits
+- Configurable sequence length for temporal learning
 - Comprehensive statistics reporting
+
+## Key Improvements
+
+- **Modern Gymnasium API**: Uses CartPole-v1 with latest Gymnasium features
+- **Built-in Frame Stacking**: Replaced custom sequence management with `FrameStackObservation` wrapper
+- **Automatic Normalization**: Built-in observation normalization for stable learning
+- **Simplified Architecture**: Cleaner code leveraging Gymnasium's wrapper ecosystem
+- **Better Performance**: Normalized inputs and proper frame stacking improve learning stability
 
 ## Installation
 
@@ -118,20 +130,26 @@ Total episodes: 100
 ## Algorithm Details
 
 The LSTM controller uses:
-- **Input**: Sequences of CartPole states and actions for temporal learning
-- **Architecture**: Input(sequence_length, 5) → LSTM(10 units) → Tanh → Dense(1) → Sigmoid
-- **Sequence Structure**: Each timestep contains [position, velocity, angle, angular_velocity, previous_action]
-- **Sequence Length**: Configurable (default: 5), longer sequences provide more temporal context
-- **Training**: Online learning with MSE loss during each episode
+- **Environment**: CartPole-v1 with Gymnasium wrappers
+- **Input**: Stacked and normalized observations + action history via `FrameStackObservation` and `NormalizeObservation`
+- **Architecture**: Input(sequence_length × 4 + sequence_length) → Reshape → LSTM(10 units) → Tanh → Dense(1) → Sigmoid
+- **Sequence Structure**: 
+  - Observations: Automatic frame stacking provides temporal context
+  - Actions: Manual action history management for the last `sequence_length` actions
+  - Combined input: Each timestep contains [observation_features, previous_action]
+- **Sequence Length**: Configurable (default: 5), affects both observation and action history
+- **Normalization**: Automatic observation normalization for stable learning
+- **Training**: Online learning with MSE loss using current observations and action history
 - **Action Selection**: Sigmoid output > 0.5 → action 1, else action 0
-- **Memory Management**: Automatic history buffer management, reset between episodes
+- **Memory Management**: Action history is reset between episodes
 
-### Sequence Learning Benefits
+### Key Implementation Features
 
-- **Temporal Context**: LSTM can learn from patterns across multiple timesteps
-- **Memory**: Better handling of momentum and trajectory information
-- **Adaptability**: Configurable sequence length for different learning strategies
-- **History Management**: Automatic padding and buffer management for variable episode lengths
+- **Correct Training Logic**: Uses current observations for learning, not previous ones
+- **Action History Integration**: LSTM receives both stacked observations and action sequences
+- **Temporal Learning**: Can learn from patterns in both state transitions and action sequences
+- **Episode Management**: Action history is properly reset between episodes
+- **Verbose Debugging**: Shows observation frames, action history, and input construction
 
 ## Dependencies
 
